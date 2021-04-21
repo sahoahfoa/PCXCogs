@@ -54,6 +54,8 @@ class AutoRoomCommands(MixinMeta, ABC, metaclass=CompositeMetaClass):
                 timedelta=datetime.datetime.utcnow() - autoroom_channel.created_at
             ),
         )
+        room_settings.add("Associated text channel", autoroom_info["associated_text_channel"])
+        room_settings.add("Persistance", autoroom_info["persist_text_channel"])
 
         await ctx.send(str(room_settings))
 
@@ -115,6 +117,37 @@ class AutoRoomCommands(MixinMeta, ABC, metaclass=CompositeMetaClass):
             await autoroom_channel.edit(user_limit=limit)
         await ctx.tick()
         await delete(ctx.message, delay=5)
+
+    @autoroom.command()
+    async def persist(self, ctx: commands.Context):
+        """Toggle AutoRoom text channel persistence."""
+        channel = self._get_current_voice_channel(ctx.message.author)
+        autoroom_info = await self._get_autoroom_info(channel)
+        if not autoroom_info:
+            hint = await ctx.send(
+                error(f"{ctx.message.author.mention}, you are not in an AutoRoom.")
+            )
+            await delete(ctx.message, delay=5)
+            await delete(hint, delay=5)
+            return
+
+        text_channel = self.bot.get_channel(autoroom_info['associated_text_channel'])
+
+        toggle_persist = not autoroom_info['persist_text_channel']
+        await self.config.channel(
+            channel
+        ).persist_text_channel.set(toggle_persist)
+
+        msg = info(f"AutoRoom {text_channel.mention} is {'persistant' if toggle_persist else 'not persistant'}.")
+
+        if ctx.channel != text_channel:
+            hint = await ctx.send(msg)
+            await delete(hint, delay=15)
+        await delete(ctx.message, delay=15)
+
+        ch_msg = await text_channel.send(msg)
+        
+        
 
     @autoroom.command()
     async def public(self, ctx: commands.Context):
@@ -276,9 +309,13 @@ class AutoRoomCommands(MixinMeta, ABC, metaclass=CompositeMetaClass):
                 member_roles.append(member_role)
         if not member_roles:
             member_roles = [autoroom.guild.default_role]
+        persist_text_channel = await self.config.channel(autoroom).persist_text_channel()
+        associated_text_channel = await self.config.channel(autoroom).associated_text_channel()
         return {
             "owner": owner,
             "member_roles": member_roles,
+            "persist_text_channel": persist_text_channel,
+            "associated_text_channel": associated_text_channel,
         }
 
     async def _get_autoroom_channel_and_info(self, ctx: commands.Context):

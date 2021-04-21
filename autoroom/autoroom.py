@@ -1,5 +1,6 @@
 """AutoRoom cog for Red-DiscordBot by PhasecoreX."""
 import asyncio
+import re
 from typing import List, Union
 
 import discord
@@ -44,6 +45,7 @@ class AutoRoom(Commands, commands.Cog, metaclass=CompositeMetaClass):
         "owner": None,
         "member_roles": [],
         "associated_text_channel": None,
+        "persist_text_channel": False,
     }
 
     def __init__(self, bot):
@@ -206,41 +208,46 @@ class AutoRoom(Commands, commands.Cog, metaclass=CompositeMetaClass):
             if voice_channel:
                 await self._process_autoroom_delete(voice_channel)
             else:
-                text_channel = self.bot.get_channel(
-                    voice_channel_settings["associated_text_channel"]
-                )
-                if (
-                    text_channel
-                    and text_channel.permissions_for(
-                        text_channel.guild.me
-                    ).manage_channels
-                ):
-                    await text_channel.delete(
-                        reason="AutoRoom: Associated voice channel deleted."
+                if not voice_channel_settings['persist_text_channel']:
+                    text_channel = self.bot.get_channel(
+                        voice_channel_settings["associated_text_channel"]
                     )
-                await self.config.channel_from_id(voice_channel_id).clear()
+                    if (
+                        text_channel
+                        and text_channel.permissions_for(
+                            text_channel.guild.me
+                        ).manage_channels
+                    ):
+                        await text_channel.delete(
+                            reason="AutoRoom: Associated voice channel deleted."
+                        )
+                    await self.config.channel_from_id(voice_channel_id).clear()
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, guild_channel: discord.abc.GuildChannel):
         """Clean up config when an AutoRoom is deleted (either by the bot or the user)."""
         if not isinstance(guild_channel, discord.VoiceChannel):
             return
-        text_channel_id = await self.config.channel(
+        persist_text_channel = await self.config.channel(
             guild_channel
-        ).associated_text_channel()
-        text_channel = (
-            guild_channel.guild.get_channel(text_channel_id)
-            if text_channel_id
-            else None
-        )
-        if (
-            text_channel
-            and text_channel.permissions_for(text_channel.guild.me).manage_channels
-        ):
-            await text_channel.delete(
-                reason="AutoRoom: Associated voice channel deleted."
+        ).persist_text_channel()
+        if not persist_text_channel:
+            text_channel_id = await self.config.channel(
+                guild_channel
+            ).associated_text_channel()
+            text_channel = (
+                guild_channel.guild.get_channel(text_channel_id)
+                if text_channel_id
+                else None
             )
-        await self.config.channel(guild_channel).clear()
+            if (
+                text_channel
+                and text_channel.permissions_for(text_channel.guild.me).manage_channels
+            ):
+                await text_channel.delete(
+                    reason="AutoRoom: Associated voice channel deleted."
+                )
+            await self.config.channel(guild_channel).clear()
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -252,7 +259,10 @@ class AutoRoom(Commands, commands.Cog, metaclass=CompositeMetaClass):
         after_channel_config = await self.get_autoroom_source_config(after.channel)
         # If user left a voice channel that isn't an AutoRoom Source, do cleanup
         if before.channel and not before_channel_config:
-            if not await self._process_autoroom_delete(before.channel):
+            persist_text_channel = await self.config.channel(
+                before.channel
+            ).persist_text_channel()
+            if not await self._process_autoroom_delete(before.channel) or persist_text_channel:
                 # AutoRoom wasn't deleted, so update text channel perms
                 await self._process_autoroom_text_perms(before.channel)
         # If user entered a voice channel...
@@ -395,12 +405,33 @@ class AutoRoom(Commands, commands.Cog, metaclass=CompositeMetaClass):
                             else None,
                         ),
                     }
-                    new_text_channel = await guild.create_text_channel(
-                        name=new_channel_name.replace("'s ", " "),
-                        category=dest_category,
-                        reason="AutoRoom: New text channel needed.",
-                        overwrites=overwrites,
-                    )
+                    new_text_channel_name = self.format_text_channel_name(new_channel_name)
+
+                    new_text_channel = None
+
+                    for text_channel in dest_category.text_channels:
+
+                        if text_channel.name == new_text_channel_name:
+                            new_text_channel = text_channel
+                            
+                            await self.config.channel(
+                                new_voice_channel
+                            ).persist_text_channel.set(True)
+
+                            await text_channel.edit(
+                                reason="AutoRoom: Persistant text channel. Overrides updated.",
+                                overwrites=overwrites,
+                            )
+                            break
+
+                    if not new_text_channel:
+                        new_text_channel = await guild.create_text_channel(
+                            name=new_text_channel_name,
+                            category=dest_category,
+                            reason="AutoRoom: New text channel needed.",
+                            overwrites=overwrites,
+                        )
+
                     await self.config.channel(
                         new_voice_channel
                     ).associated_text_channel.set(new_text_channel.id)
@@ -526,6 +557,14 @@ class AutoRoom(Commands, commands.Cog, metaclass=CompositeMetaClass):
             template=template,
             data={**nums, **data},
         )[:100].strip()
+
+    def format_text_channel_name(self, channel_name: str):
+        channel_name = channel_name.lower()
+        channel_name = re.sub(r'[\\\'!"#$%&()*+,./:;<=>?@[\]^`{|}~]', '', channel_name)
+        channel_name = re.sub(r'[\s\-~]+', '-', channel_name)
+        channel_name = re.sub(r'-+$', '', channel_name)
+        channel_name = re.sub(r'^-+', '', channel_name)
+        return channel_name
 
     async def get_member_roles_for_source(
         self, autoroom_source: discord.VoiceChannel
